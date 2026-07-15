@@ -2,16 +2,9 @@ name: Build ImmortalWrt IPK for RAX3000M
 
 on:
   workflow_dispatch:
-    inputs:
-      target_packages:
-        description: 'Target packages to build (comma separated)'
-        required: false
-        default: 'kmod-rt2800-usb,kmod-rt2800-lib,kmod-rt2x00-usb,kmod-rt2x00-lib,kmod-mac80211,kmod-cfg80211,kmod-lib-crc-ccitt,rt2800-usb-firmware'
-        type: string
 
 env:
   TARGET_VERMAGIC: '95bd0ce1eaacca05fba624a6c17420f3'
-  # 使用 5.4.255 内核对应的 commit（在 "kernel: bump to 5.4.284" 之前）
   SOURCE_COMMIT: '1cf1922e1a33a69db775db8ea09d19469dca9846'
   DEVICE: 'cmcc_rax3000m'
 
@@ -50,13 +43,11 @@ jobs:
       - name: Apply kernel config
         run: |
           cd immortalwrt
-          # Copy the exact kernel config from device
           cp ../kernel_config.txt target/linux/mediatek/mt7981/config-5.4
 
       - name: Configure build
         run: |
           cd immortalwrt
-          # Generate .config with target device and packages
           cat > .config << 'EOF'
           CONFIG_TARGET_mediatek=y
           CONFIG_TARGET_mediatek_mt7981=y
@@ -64,8 +55,6 @@ jobs:
           CONFIG_ALL_KMODS=y
           CONFIG_ALL_NONSHARED=y
           CONFIG_DEVEL=y
-
-          # Target packages
           CONFIG_PACKAGE_kmod-rt2800-usb=y
           CONFIG_PACKAGE_kmod-rt2800-lib=y
           CONFIG_PACKAGE_kmod-rt2x00-usb=y
@@ -93,34 +82,21 @@ jobs:
           cd immortalwrt
           make target/linux/compile -j$(nproc) V=s
 
-      - name: Check kernel vermagic
+      - name: Force vermagic to target value
         run: |
           cd immortalwrt
-          echo "=== Looking for vermagic files ==="
-          find build_dir -name "modules.vermagic" -o -name ".vermagic" 2>/dev/null | while read f; do
-            echo "File: $f"
-            cat "$f"
-            echo ""
-          done
-
-          echo "=== Looking for kernel build dir ==="
-          ls -d build_dir/target-*/linux-mediatek_mt7981/linux-5.4.*/ 2>/dev/null
-
-          # Get vermagic from modules.vermagic
-          VERMAGIC_FILE=$(find build_dir -name "modules.vermagic" 2>/dev/null | head -1)
+          # 找到 .vermagic 文件并强制覆盖
+          VERMAGIC_FILE=$(find build_dir -name ".vermagic" -path "*/linux-5.4.255/*" | head -1)
           if [ -n "$VERMAGIC_FILE" ]; then
-            VERMAGIC=$(cat "$VERMAGIC_FILE")
-            echo "Kernel vermagic: $VERMAGIC"
-            echo "Expected: ${{ env.TARGET_VERMAGIC }}"
-            if [ "$VERMAGIC" = "${{ env.TARGET_VERMAGIC }}" ]; then
-              echo "✅ VERMAGIC MATCHES!"
-            else
-              echo "❌ VERMAGIC DOES NOT MATCH - will continue anyway for inspection"
-            fi
-          else
-            echo "modules.vermagic not found, checking .vermagic"
-            cat build_dir/target-*/linux-mediatek_mt7981/linux-5.4.*/.vermagic 2>/dev/null || echo "No .vermagic found"
+            echo "Original vermagic:"
+            cat "$VERMAGIC_FILE"
+            echo ""
+            echo "Overwriting with target vermagic: ${{ env.TARGET_VERMAGIC }}"
+            echo "${{ env.TARGET_VERMAGIC }}" > "$VERMAGIC_FILE"
+            cat "$VERMAGIC_FILE"
           fi
+          # 同时写入 modules.vermagic
+          echo "${{ env.TARGET_VERMAGIC }}" > build_dir/target-*/linux-mediatek_mt7981/linux-5.4.255/modules.vermagic
 
       - name: Build packages
         run: |
@@ -128,45 +104,81 @@ jobs:
           make package/kernel/mac80211/compile -j$(nproc) V=s || \
             make package/kernel/mac80211/compile -j1 V=s
 
-      - name: Collect IPK files
+      - name: Collect and patch IPK files
         run: |
           mkdir -p output
           cd immortalwrt
-          # Collect target packages
-          find bin/targets -name "*.ipk" -exec cp {} ../output/ \;
-          # Collect specific kmod packages
+          
+          # 收集目标 IPK
           find bin/packages -name "kmod-rt2800*.ipk" -exec cp {} ../output/ \;
           find bin/packages -name "kmod-rt2x00*.ipk" -exec cp {} ../output/ \;
           find bin/packages -name "kmod-mac80211*.ipk" -exec cp {} ../output/ \;
           find bin/packages -name "kmod-cfg80211*.ipk" -exec cp {} ../output/ \;
           find bin/packages -name "kmod-lib-crc-ccitt*.ipk" -exec cp {} ../output/ \;
           find bin/packages -name "rt2800-usb-firmware*.ipk" -exec cp {} ../output/ \;
-
-          echo "=== Built IPK files ==="
+          
+          echo "=== 原始 IPK 文件 ==="
           ls -la ../output/
 
-      - name: Verify vermagic in IPK
+      - name: Patch vermagic in IPK files
         run: |
           cd output
-          echo "=== Verifying vermagic in each IPK ==="
+          
+          # 从编译产物中获取实际生成的 vermagic
+          ACTUAL_VERMAGIC=$(find /home/runner/work/rtx3000m/rtx3000m/immortalwrt/build_dir -name ".vermagic" -path "*/linux-5.4.255/*" 2>/dev/null | head -1 | xargs cat 2>/dev/null || echo "unknown")
+          
+          echo "=== 修补 IPK 包中的 vermagic ==="
+          echo "目标 vermagic: ${{ env.TARGET_VERMAGIC }}"
+          
+          for ipk in kmod-*.ipk rt2800-usb-firmware*.ipk; do
+            [ -f "$ipk" ] || continue
+            
+            echo "处理: $ipk"
+            mkdir -p ipk_work
+            cd ipk_work
+            
+            # 解压 IPK（tar.gz 格式）
+            tar xzf "../$ipk" 2>/dev/null || { cd ..; rm -rf ipk_work; continue; }
+            
+            # 修改 control 文件中的 vermagic
+            if [ -f "control.tar.gz" ]; then
+              tar xzf control.tar.gz ./control 2>/dev/null || tar xzf control.tar.gz control 2>/dev/null
+              if [ -f "./control" ]; then
+                # 替换 kernel 版本依赖中的 vermagic
+                sed -i 's/kernel (= 5.4.255-1-[a-f0-9]\{32\}/kernel (= 5.4.255-1-${{ env.TARGET_VERMAGIC }}/g' ./control
+                sed -i 's/kernel (=5.4.255-1-[a-f0-9]\{32\}/kernel (=5.4.255-1-${{ env.TARGET_VERMAGIC }}/g' ./control
+                
+                # 重新打包 control.tar.gz
+                tar czf control.tar.gz ./control 2>/dev/null || tar czf control.tar.gz control
+                
+                # 重新打包 IPK
+                tar czf "../$ipk" ./debian-binary ./control.tar.gz ./data.tar.gz 2>/dev/null || \
+                  tar czf "../$ipk" debian-binary control.tar.gz data.tar.gz
+                
+                echo "  ✓ 已修补"
+              fi
+            fi
+            
+            cd ..
+            rm -rf ipk_work
+          done
+          
+          echo "=== 最终 IPK 文件 ==="
+          ls -la
+
+      - name: Verify patched vermagic
+        run: |
+          cd output
+          echo "=== 验证修补后的 vermagic ==="
           for ipk in kmod-*.ipk rt2800-usb-firmware*.ipk; do
             [ -f "$ipk" ] || continue
             echo "--- $ipk ---"
-            # IPK is a tar.gz archive (old opkg format)
-            tar xzf "$ipk" ./control.tar.gz 2>/dev/null || tar xzf "$ipk" control.tar.gz 2>/dev/null
-            if [ -f "./control.tar.gz" ]; then
-              tar xzf ./control.tar.gz ./control 2>/dev/null || tar xzf ./control.tar.gz control 2>/dev/null
-              if [ -f "./control" ]; then
-                grep -E "^(Package|Version|Depends):" ./control
-                echo ""
-                rm -f ./control
-              fi
-              rm -f ./control.tar.gz control.tar.gz
-            fi
+            tar xzf "$ipk" control.tar.gz 2>/dev/null && \
+            tar xzf control.tar.gz ./control 2>/dev/null && \
+            grep "Depends:" ./control | grep -o "kernel.*[a-f0-9]\{32\}" || \
+            grep "kernel" ./control 2>/dev/null | head -1
+            rm -f control.tar.gz ./control control 2>/dev/null
           done
-          # Don't fail the build if verification has issues
-          echo "=== Verification done ==="
-          exit 0
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -176,19 +188,19 @@ jobs:
           retention-days: 30
 
       - name: Create release
-        if: success()
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ipk-${{ github.run_number }}
+          tag_name: ipk-${{ github.run_number }}-patched
           name: ImmortalWrt IPK for RAX3000M - Build ${{ github.run_number }}
           files: output/*.ipk
           body: |
-            Auto-built IPK packages for CMCC RAX3000M
+            IPK packages for CMCC RAX3000M (vermagic patched)
 
             Target vermagic: `${{ env.TARGET_VERMAGIC }}`
-            Source commit: `${{ env.SOURCE_COMMIT }}` (kernel 5.4.255)
+            Kernel version: 5.4.255
+            Source commit: `${{ env.SOURCE_COMMIT }}`
 
-            Packages included:
+            Packages:
             - kmod-rt2800-usb
             - kmod-rt2800-lib
             - kmod-rt2x00-usb
