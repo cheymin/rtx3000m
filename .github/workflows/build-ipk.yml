@@ -91,12 +91,20 @@ jobs:
             echo "Original vermagic:"
             cat "$VERMAGIC_FILE"
             echo ""
-            echo "Overwriting with target vermagic: ${{ env.TARGET_VERMAGIC }}"
+            echo "Overwriting .vermagic with target: ${{ env.TARGET_VERMAGIC }}"
             echo "${{ env.TARGET_VERMAGIC }}" > "$VERMAGIC_FILE"
             cat "$VERMAGIC_FILE"
+          else
+            echo ".vermagic file not found, will patch IPK post-build instead"
           fi
-          # 同时写入 modules.vermagic
-          echo "${{ env.TARGET_VERMAGIC }}" > build_dir/target-*/linux-mediatek_mt7981/linux-5.4.255/modules.vermagic
+          # 同时写入 modules.vermagic（如果目录存在才写）
+          KERNEL_DIR=$(find build_dir -type d -path "*/linux-mediatek_mt7981/linux-5.4.255" 2>/dev/null | head -1)
+          if [ -n "$KERNEL_DIR" ]; then
+            echo "${{ env.TARGET_VERMAGIC }}" > "$KERNEL_DIR/modules.vermagic"
+            echo "modules.vermagic written to $KERNEL_DIR/modules.vermagic"
+          else
+            echo "kernel dir not found, skipping modules.vermagic (will patch IPK post-build)"
+          fi
 
       - name: Build packages
         run: |
@@ -124,9 +132,6 @@ jobs:
         run: |
           cd output
           
-          # 从编译产物中获取实际生成的 vermagic
-          ACTUAL_VERMAGIC=$(find /home/runner/work/rtx3000m/rtx3000m/immortalwrt/build_dir -name ".vermagic" -path "*/linux-5.4.255/*" 2>/dev/null | head -1 | xargs cat 2>/dev/null || echo "unknown")
-          
           echo "=== 修补 IPK 包中的 vermagic ==="
           echo "目标 vermagic: ${{ env.TARGET_VERMAGIC }}"
           
@@ -137,23 +142,18 @@ jobs:
             mkdir -p ipk_work
             cd ipk_work
             
-            # 解压 IPK（tar.gz 格式）
             tar xzf "../$ipk" 2>/dev/null || { cd ..; rm -rf ipk_work; continue; }
             
-            # 修改 control 文件中的 vermagic
             if [ -f "control.tar.gz" ]; then
-              tar xzf control.tar.gz ./control 2>/dev/null || tar xzf control.tar.gz control 2>/dev/null
+              tar xzf control.tar.gz 2>/dev/null
               if [ -f "./control" ]; then
-                # 替换 kernel 版本依赖中的 vermagic
-                sed -i 's/kernel (= 5.4.255-1-[a-f0-9]\{32\}/kernel (= 5.4.255-1-${{ env.TARGET_VERMAGIC }}/g' ./control
-                sed -i 's/kernel (=5.4.255-1-[a-f0-9]\{32\}/kernel (=5.4.255-1-${{ env.TARGET_VERMAGIC }}/g' ./control
+                sed -i 's/kernel (= 5\.4\.255-1-[a-f0-9]\{32\}/kernel (= 5.4.255-1-${{ env.TARGET_VERMAGIC }}/g' ./control
+                sed -i 's/kernel (=5\.4\.255-1-[a-f0-9]\{32\}/kernel (=5.4.255-1-${{ env.TARGET_VERMAGIC }}/g' ./control
                 
-                # 重新打包 control.tar.gz
                 tar czf control.tar.gz ./control 2>/dev/null || tar czf control.tar.gz control
                 
-                # 重新打包 IPK
-                tar czf "../$ipk" ./debian-binary ./control.tar.gz ./data.tar.gz 2>/dev/null || \
-                  tar czf "../$ipk" debian-binary control.tar.gz data.tar.gz
+                tar czf "../$ipk" debian-binary control.tar.gz data.tar.gz 2>/dev/null || \
+                  tar czf "../$ipk" ./debian-binary ./control.tar.gz ./data.tar.gz
                 
                 echo "  ✓ 已修补"
               fi
