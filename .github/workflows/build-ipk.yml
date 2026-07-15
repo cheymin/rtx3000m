@@ -11,7 +11,8 @@ on:
 
 env:
   TARGET_VERMAGIC: '95bd0ce1eaacca05fba624a6c17420f3'
-  OPENWRT_VERSION: '21.02'
+  # 使用 5.4.255 内核对应的 commit（在 "kernel: bump to 5.4.284" 之前）
+  SOURCE_COMMIT: '1cf1922e1a33a69db775db8ea09d19469dca9846'
   DEVICE: 'cmcc_rax3000m'
 
 jobs:
@@ -36,12 +37,15 @@ jobs:
             gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
             python3-setuptools rsync swig unzip zlib1g-dev file wget
 
-      - name: Clone ImmortalWrt source
+      - name: Clone ImmortalWrt source (5.4.255 kernel)
         run: |
-          git clone --depth=1 --branch=openwrt-${{ env.OPENWRT_VERSION }} \
-            https://github.com/hanwckf/immortalwrt-mt798x.git immortalwrt
+          echo "Cloning at commit ${{ env.SOURCE_COMMIT }} (kernel 5.4.255)"
+          git clone https://github.com/hanwckf/immortalwrt-mt798x.git immortalwrt
           cd immortalwrt
+          git checkout ${{ env.SOURCE_COMMIT }}
           echo "Source commit: $(git rev-parse HEAD)"
+          echo "Kernel version check:"
+          cat include/kernel-5.4
 
       - name: Apply kernel config
         run: |
@@ -92,15 +96,30 @@ jobs:
       - name: Check kernel vermagic
         run: |
           cd immortalwrt
-          VERMAGIC=$(grep "vermagic=" build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7981/linux-5.4.*/.config 2>/dev/null || \
-                     cat build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7981/linux-5.4.*/Module.symvers | head -1 | awk '{print $1}')
-          echo "Kernel vermagic: $VERMAGIC"
-          echo "Expected: ${{ env.TARGET_VERMAGIC }}"
+          echo "=== Looking for vermagic files ==="
+          find build_dir -name "modules.vermagic" -o -name ".vermagic" 2>/dev/null | while read f; do
+            echo "File: $f"
+            cat "$f"
+            echo ""
+          done
 
-          # Check modules.vermagic file
-          if [ -f build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7981/linux-5.4.*/modules.vermagic ]; then
-            VERMAGIC=$(cat build_dir/target-aarch64_cortex-a53_musl/linux-mediatek_mt7981/linux-5.4.*/modules.vermagic)
-            echo "modules.vermagic content: $VERMAGIC"
+          echo "=== Looking for kernel build dir ==="
+          ls -d build_dir/target-*/linux-mediatek_mt7981/linux-5.4.*/ 2>/dev/null
+
+          # Get vermagic from modules.vermagic
+          VERMAGIC_FILE=$(find build_dir -name "modules.vermagic" 2>/dev/null | head -1)
+          if [ -n "$VERMAGIC_FILE" ]; then
+            VERMAGIC=$(cat "$VERMAGIC_FILE")
+            echo "Kernel vermagic: $VERMAGIC"
+            echo "Expected: ${{ env.TARGET_VERMAGIC }}"
+            if [ "$VERMAGIC" = "${{ env.TARGET_VERMAGIC }}" ]; then
+              echo "✅ VERMAGIC MATCHES!"
+            else
+              echo "❌ VERMAGIC DOES NOT MATCH - will continue anyway for inspection"
+            fi
+          else
+            echo "modules.vermagic not found, checking .vermagic"
+            cat build_dir/target-*/linux-mediatek_mt7981/linux-5.4.*/.vermagic 2>/dev/null || echo "No .vermagic found"
           fi
 
       - name: Build packages
@@ -113,7 +132,9 @@ jobs:
         run: |
           mkdir -p output
           cd immortalwrt
+          # Collect target packages
           find bin/targets -name "*.ipk" -exec cp {} ../output/ \;
+          # Collect specific kmod packages
           find bin/packages -name "kmod-rt2800*.ipk" -exec cp {} ../output/ \;
           find bin/packages -name "kmod-rt2x00*.ipk" -exec cp {} ../output/ \;
           find bin/packages -name "kmod-mac80211*.ipk" -exec cp {} ../output/ \;
@@ -127,14 +148,25 @@ jobs:
       - name: Verify vermagic in IPK
         run: |
           cd output
-          for ipk in *.ipk; do
-            echo "=== Checking $ipk ==="
-            tar xzf "$ipk" control.tar.gz 2>/dev/null
-            tar xzf control.tar.gz ./control 2>/dev/null
-            grep -i "kernel.*5.4.255" ./control || echo "Version info:"
-            grep "Depends:" ./control | grep -o "kernel.*[a-f0-9]\{32\}" || true
-            rm -f control.tar.gz control 2>/dev/null
+          echo "=== Verifying vermagic in each IPK ==="
+          for ipk in kmod-*.ipk rt2800-usb-firmware*.ipk; do
+            [ -f "$ipk" ] || continue
+            echo "--- $ipk ---"
+            # IPK is a tar.gz archive (old opkg format)
+            tar xzf "$ipk" ./control.tar.gz 2>/dev/null || tar xzf "$ipk" control.tar.gz 2>/dev/null
+            if [ -f "./control.tar.gz" ]; then
+              tar xzf ./control.tar.gz ./control 2>/dev/null || tar xzf ./control.tar.gz control 2>/dev/null
+              if [ -f "./control" ]; then
+                grep -E "^(Package|Version|Depends):" ./control
+                echo ""
+                rm -f ./control
+              fi
+              rm -f ./control.tar.gz control.tar.gz
+            fi
           done
+          # Don't fail the build if verification has issues
+          echo "=== Verification done ==="
+          exit 0
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -154,6 +186,7 @@ jobs:
             Auto-built IPK packages for CMCC RAX3000M
 
             Target vermagic: `${{ env.TARGET_VERMAGIC }}`
+            Source commit: `${{ env.SOURCE_COMMIT }}` (kernel 5.4.255)
 
             Packages included:
             - kmod-rt2800-usb
