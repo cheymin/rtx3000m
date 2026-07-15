@@ -117,15 +117,17 @@ jobs:
           mkdir -p output
           cd immortalwrt
           
-          # 收集目标 IPK
-          find bin/packages -name "kmod-rt2800*.ipk" -exec cp {} ../output/ \;
-          find bin/packages -name "kmod-rt2x00*.ipk" -exec cp {} ../output/ \;
-          find bin/packages -name "kmod-mac80211*.ipk" -exec cp {} ../output/ \;
-          find bin/packages -name "kmod-cfg80211*.ipk" -exec cp {} ../output/ \;
-          find bin/packages -name "kmod-lib-crc-ccitt*.ipk" -exec cp {} ../output/ \;
+          # kmod 包在 bin/targets/mediatek/mt7981/packages/ 下
+          find bin/targets -name "kmod-rt2800*.ipk" -exec cp {} ../output/ \;
+          find bin/targets -name "kmod-rt2x00*.ipk" -exec cp {} ../output/ \;
+          find bin/targets -name "kmod-mac80211*.ipk" -exec cp {} ../output/ \;
+          find bin/targets -name "kmod-cfg80211*.ipk" -exec cp {} ../output/ \;
+          find bin/targets -name "kmod-lib-crc-ccitt*.ipk" -exec cp {} ../output/ \;
+          
+          # 固件包在 bin/packages/aarch64_cortex-a53/base/ 下
           find bin/packages -name "rt2800-usb-firmware*.ipk" -exec cp {} ../output/ \;
           
-          echo "=== 原始 IPK 文件 ==="
+          echo "=== 收集到的 IPK 文件 ==="
           ls -la ../output/
 
       - name: Patch vermagic in IPK files
@@ -188,7 +190,9 @@ jobs:
           retention-days: 30
 
       - name: Create release
-        uses: softprops/action-gh-release@v1
+        if: success()
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ipk-${{ github.run_number }}-patched
           name: ImmortalWrt IPK for RAX3000M - Build ${{ github.run_number }}
