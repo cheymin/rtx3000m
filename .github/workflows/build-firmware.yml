@@ -8,6 +8,7 @@ on:
     paths:
       - '.github/workflows/build-firmware.yml'
       - 'firmware.config'
+      - 'diy-part2.sh'
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt
@@ -16,7 +17,6 @@ env:
   CONFIG_FILE: firmware.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
@@ -63,6 +63,20 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
+    - name: Patch device name for RAX3000M
+      run: |
+        cd openwrt
+        echo "=== Before patch ==="
+        grep -n "cmcc_rax3000m" target/linux/mediatek/image/filogic.mk | head -20
+        # Add SUPPORTED_DEVICES += cmcc,rax3000m to make firmware compatible with current router
+        sed -i '/define Device\/cmcc_rax3000m/,/^endef/ {
+          /SUPPORTED_DEVICES/! {
+            /^endef/i \  SUPPORTED_DEVICES += cmcc,rax3000m
+          }
+        }' target/linux/mediatek/image/filogic.mk
+        echo "=== After patch ==="
+        grep -n "cmcc_rax3000m" target/linux/mediatek/image/filogic.mk | head -20
+
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
@@ -76,15 +90,9 @@ jobs:
       run: |
         cd openwrt
         make defconfig
-        # Force only cmcc_rax3000m device, disable all others
-        sed -i 's/CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_\(.*\)=y/# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_\1 is not set/g' .config
-        sed -i 's/# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m is not set/CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m=y/g' .config
-        # Disable multi-profile to only build selected device
-        sed -i 's/CONFIG_TARGET_MULTI_PROFILE=y/# CONFIG_TARGET_MULTI_PROFILE is not set/g' .config
-        make defconfig
         echo "=== Selected device config ==="
         grep 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m' .config
-        echo "=== All enabled devices (should only be cmcc_rax3000m) ==="
+        echo "=== All enabled devices ==="
         grep 'CONFIG_TARGET_DEVICE_.*=y' .config
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
@@ -103,13 +111,6 @@ jobs:
       if: (!cancelled())
       run: df -hT
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.FILE_DATE }}
-        path: openwrt/bin
-
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
@@ -118,11 +119,11 @@ jobs:
         rm -rf packages
         echo "=== ALL firmware files generated ==="
         ls -la
-        echo "=== cmcc_rax3000m files only ==="
-        ls -la | grep cmcc_rax3000m || echo "NO cmcc_rax3000m FILES FOUND!"
+        echo "=== cmcc_rax3000m files ==="
+        ls -la | grep cmcc_rax3000m
         # Create directory with only cmcc_rax3000m files
         mkdir -p /tmp/firmware_rax3000m
-        cp cmcc_rax3000m* /tmp/firmware_rax3000m/ 2>/dev/null || echo "No cmcc_rax3000m files to copy"
+        cp cmcc_rax3000m* /tmp/firmware_rax3000m/ 2>/dev/null
         echo "=== Final files to upload ==="
         ls -la /tmp/firmware_rax3000m/
         echo "FIRMWARE=/tmp/firmware_rax3000m" >> $GITHUB_ENV
@@ -132,7 +133,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: RAX3000M_Firmware_Only${{ env.FILE_DATE }}
+        name: RAX3000M_Firmware${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: Upload firmware to release
@@ -140,12 +141,12 @@ jobs:
       if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
       continue-on-error: true
       with:
-        tag_name: ImmortalWrt-23.05-RAX3000M-NAND${{ env.FILE_DATE }}
+        tag_name: ImmortalWrt-23.05-RAX3000M${{ env.FILE_DATE }}
         body: |
           ImmortalWrt 23.05 for CMCC RAX3000M (NAND)
+          - Device name patched: supports both cmcc,rax3000m and cmcc,rax3000m-nand-ubootmod
           - Default theme: Argon
           - Language: Chinese
           - Plugins: OpenClash, ttyd terminal
-          - Platform: mediatek/filogic
-          - Kernel: 5.15.x
+          - Can be flashed directly via web UI sysupgrade
         files: ${{ env.FIRMWARE }}/*
